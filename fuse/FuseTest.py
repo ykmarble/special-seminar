@@ -10,6 +10,12 @@ import sys
 import logging
 from stat import *
 
+def logger(func):
+    def _logger(*args, **kargs):
+        logging.debug("Called %s%s."%(func.__name__, args[1:]))
+        return func(*args, **kargs)
+    return _logger
+
 class Operations(llfuse.Operations):
     '''
     fhとinodeは同じ値を使いまわす
@@ -18,7 +24,6 @@ class Operations(llfuse.Operations):
     def __init__(self):
         super(Operations, self).__init__()
         self.contents = {}
-        self.stats = {}
         self.inode_count = defaultdict(int)
         self.nextino = llfuse.ROOT_INODE
 
@@ -29,117 +34,127 @@ class Operations(llfuse.Operations):
         ctx.uid = os.getuid()
         ctx.gid = os.getgid()
         ctx.pid = os.getpid()
-        inode, s = self._create_entry(mode, ctx)
-        self.stats[inode] = s
-        self.contents[inode] = Content(inode, s)
+        inode = self._create_entry(mode, ctx)
         self.contents[inode].add_child(".", inode)
 
+    @logger
     def open(self, inode, flags):
-        logging.debug("Called open function")
         self.inode_count[inode] += 1
         return inode
 
+    @logger
     def opendir(self, inode):
-        logging.debug("Called opendir function")
+        self.inode_count[inode] += 1
         return inode
-        
+
+    @logger
     def create(self, inode_p, name, mode, flags, ctx):
-        logging.debug("Called create function")
-        inode, s = self._create_entry(mode, ctx)
-        self.stats[inode] = s
-        self.contents[inode] = Content(inode, s)
+        inode = self._create_entry(mode, ctx)
         self.contents[inode_p].add_child(name, inode)
-        return (inode, s)
-        
+        return (inode, self.contents[inode].stat)
+
+    @logger
     def getattr(self, inode):
-        logging.debug("Called getattr function(inode=%s)"%inode)
-        return self.stats[inode]
+        return self.contents[inode].stat
 
+    @logger
     def read(self, fh, off, size):
-        logging.debug("Called read function")
-        return self.contents[fh].data[off:off+size+1]
+        return self.contents[fh].read(off, size)
 
+    @logger
     def lookup(self, inode_p, name):
-        logging.debug("Called lookup function(inode_p=%s,name=%s)"%(inode_p,name))
         try:
             inode = self.contents[inode_p].children[name]
             return self.getattr(inode)
         except KeyError:
             raise llfuse.FUSEError(errno.ENOENT)
 
+    @logger
     def readdir(self, inode, off):
-        logging.debug("Called readdir function")
-        logging.info("Read directory, %s(off: %s)"%(inode, off))
-        c = ((name, self.getattr(ino), len(self.contents[inode].children)) for name, ino in self.contents[inode].children.items())
+        c = self.contents[inode].children
+        children = ((name, self.getattr(c[name]), len(c)) for name in c)
         for i in xrange(off):
             try:
-                c.next()
+                children.next()
             except StopIteration:
                 break
-        return c
+        return children
 
+    @logger
     def access(self, inode, mode, ctx):
-        logging.debug("Called access function")
         return True
         
+    @logger
     def write(self, fh, offset, buf):
-        logging.debug("Called write function")
-        self.contents[fh].write(offset, buf)
-        self.stats[fh].st_size = len(self.contents[fh].data)
+        c = self.contents[fh]
+        c.write(offset, buf)
+        c.stat.st_size = len(c.data)
         return len(buf)
 
+    @logger
     def release(self, fh):
-        logging.debug("Called release function")
         self.inode_count[fh] -= 1
 
-    def mkdir(self, inode_p, name, mode, ctx):
-        logging.debug("Called mkdir function")
-        inode, s = self._create_entry(mode, ctx)
-        self.stats[inode] = s
-        self.contents[inode] = Content(inode, s)
-        self.contents[inode].add_child(".", inode)
-        self.stats[inode].st_nlink += 1
-        self.contents[inode].add_child("..", inode_p)
-        self.stats[inode_p].st_nlink += 1
-        self.contents[inode_p].add_child(name, inode)
-        logging.info("Created directory %s(%s)"%(name, inode))
-        return s
+    @logger
+    def releasedir(self, fh):
+        self.inode_count[inode] -= 1
 
+    @logger
+    def mkdir(self, inode_p, name, mode, ctx):
+        inode = self._create_entry(mode, ctx)
+        self.contents[inode_p].add_child(name, inode)
+        c = self.contents[inode]
+        c.add_child(".", inode)
+        c.stat.st_nlink += 1
+        c.add_child("..", inode_p)
+        self.contents[inode_p].stat.st_nlink += 1
+        return c.stat
+
+    @logger
     def forget(self, inode_list):
-        logging.debug("Called forget function")
         pass
+
+    @logger
     def fsync(self, fh, datasync):
-        logging.debug("Called fsync function")
         pass
+
+    @logger
     def fsyncdir(self, fh, datasync):
-        logging.debug("Called fsyncdir function")
         pass
-    def getxattr(self, inode, name):
-        logging.debug("Called getxattr function")
-        raise llfuse.FUSEError(llfuse.ENOATTR)
+
+#    def getxattr(self, inode, name):
+
 #    def link(self, inode, new_parent_inode, new_name):
+
 #    def linkxattr(self, inode):
-    def flush(self, fh):
-        pass
+
+#    def flush(self, fh):
+
 #    def readlink(self, inode):
+
+    @logger
     def unlink(self, inode_p, name):
-        logging.debug("Called unlink function")
         s = self.lookup(inode_p, name)
         s.st_nlink -= 1
         self.contents[inode_p].del_child(name)
+
+    @logger
     def rmdir(self, inode_p, name):
-        logging.debug("Called rmdir function")
         s = self.lookup(inode_p, name)
         if len(self.contents[s.st_ino].children) != 2:
             raise llfuse.FUSEError(errno.ENOTEMPTY)
         s.st_nlink -= 1
         self.contents[inode_p].del_child(name)
+
 #    def symlink(self, inode_p, name, target, ctx):
+
 #    def rename(self, inode_p_old, name_old, inode_p_new, name_new):     
+
 #    def link(self, inode, new_inode_p, new_name):
+
+    @logger
     def setattr(self, inode, attr):
-        logging.debug("Called setattr function")
-        s = self.stats[inode]
+        s = self.contents[inode].stat
         changed = ""
         if attr.st_size is not None:
             d = self.contents[inode].data
@@ -175,13 +190,13 @@ class Operations(llfuse.Operations):
             raise llfuse.FUSEError(errno.ENOSYS)
         logging.info("Set attribute of %s"%changed)
         return s
+
 #    def mknod(self, inode_p, name, mode, rdev, ctx):
 #    def statfs(self):
-    def releasedir(self, fh):
-        logging.debug("Called releasedir function")
 #    def removexattr(self, inode, name):
 #    def setxattr(self, name, value):
 
+    @logger
     def _create_entry(self, mode, ctx):
         inode = self.nextino
         self.nextino = inode + 1
@@ -201,15 +216,17 @@ class Operations(llfuse.Operations):
         s.st_mtime = time()
         s.st_atime = time()
         s.st_ctime = time()
+        self.contents[inode] = Content(s)
         logging.info("Created entry %s"%inode)
-        return (s.st_ino, s)
+        return inode
 
 class Content(object):
-    def __init__(self, inode, stat):
-        self.inode = inode
+    def __init__(self, stat):
         self.stat = stat
         self.children = {}
         self.data=b""
+    def read(self, off, size):
+        return self.data[off:off+size]
     def write(self, offset, buf):
         assert self.is_reg(), "Called write function on the file which is not regular file."
         d = self.data
@@ -224,7 +241,7 @@ class Content(object):
         return S_ISREG(self.stat.st_mode) != 0
     def is_dir(self):
         return S_ISDIR(self.stat.st_mode) != 0
-    
+
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         raise SystemExit('Usage: %s <mountpoint>' % sys.argv[0])
