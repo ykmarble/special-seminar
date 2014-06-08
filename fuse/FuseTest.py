@@ -31,7 +31,8 @@ class Operations(llfuse.Operations):
         ctx.pid = os.getpid()
         inode, s = self._create_entry(mode, ctx)
         self.stats[inode] = s
-        self.contents[inode] = Content(inode, inode, b"..")
+        self.contents[inode] = Content(inode, s)
+        self.contents[inode].add_child(".", inode)
 
     def open(self, inode, flags):
         logging.debug("Called open function")
@@ -46,7 +47,8 @@ class Operations(llfuse.Operations):
         logging.debug("Called create function")
         inode, s = self._create_entry(mode, ctx)
         self.stats[inode] = s
-        self.contents[inode] = Content(inode, inode_p, name)
+        self.contents[inode] = Content(inode, s)
+        self.contents[inode_p].add_child(name, inode)
         return (inode, s)
         
     def getattr(self, inode):
@@ -59,22 +61,22 @@ class Operations(llfuse.Operations):
 
     def lookup(self, inode_p, name):
         logging.debug("Called lookup function(inode_p=%s,name=%s)"%(inode_p,name))
-        if name == '.':
-            return(self.getattr(inode_p))
-        elif name == '..':
-            return(self.getattr(self.contents[inode_p].parent))
-        else:
-            for c in self.contents.values():
-                if (not c.removed) and c.parent ==inode_p and c.name ==name:
-                    return(self.getattr(c.inode))
+        try:
+            inode = self.contents[inode_p].children[name]
+            return self.getattr(inode)
+        except KeyError:
             raise llfuse.FUSEError(errno.ENOENT)
 
     def readdir(self, inode, off):
         logging.debug("Called readdir function")
         logging.info("Read directory, %s(off: %s)"%(inode, off))
-        for c in self.contents.values():
-            if (not c.removed) and c.parent == inode and c.inode > off:
-                yield (c.name, self.getattr(c.inode), c.inode)
+        c = ((name, self.getattr(ino), len(self.contents[inode].children)) for name, ino in self.contents[inode].children.items())
+        for i in xrange(off):
+            try:
+                c.next()
+            except StopIteration:
+                break
+        return c
 
     def access(self, inode, mode, ctx):
         logging.debug("Called access function")
@@ -94,10 +96,15 @@ class Operations(llfuse.Operations):
         logging.debug("Called mkdir function")
         inode, s = self._create_entry(mode, ctx)
         self.stats[inode] = s
-        self.contents[inode] = Content(inode, inode_p, name)
+        self.contents[inode] = Content(inode, s)
+        self.contents[inode].add_child(".", inode)
+        self.stats[inode].st_nlink += 1
+        self.contents[inode].add_child("..", inode_p)
+        self.stats[inode_p].st_nlink += 1
+        self.contents[inode_p].add_child(name, inode)
         logging.info("Created directory %s(%s)"%(name, inode))
         return s
-        
+
     def forget(self, inode_list):
         logging.debug("Called forget function")
         pass
@@ -116,13 +123,17 @@ class Operations(llfuse.Operations):
         pass
 #    def readlink(self, inode):
     def unlink(self, inode_p, name):
+        logging.debug("Called unlink function")
         s = self.lookup(inode_p, name)
         s.st_nlink -= 1
-        self.contents[s.st_ino].remove()
+        self.contents[inode_p].del_child(name)
     def rmdir(self, inode_p, name):
+        logging.debug("Called rmdir function")
         s = self.lookup(inode_p, name)
+        if len(self.contents[s.st_ino].children) != 2:
+            raise llfuse.FUSEError(errno.ENOTEMPTY)
         s.st_nlink -= 1
-        self.contents[s.st_ino].remove()
+        self.contents[inode_p].del_child(name)
 #    def symlink(self, inode_p, name, target, ctx):
 #    def rename(self, inode_p_old, name_old, inode_p_new, name_new):     
 #    def link(self, inode, new_inode_p, new_name):
@@ -194,20 +205,25 @@ class Operations(llfuse.Operations):
         return (s.st_ino, s)
 
 class Content(object):
-    def __init__(self, inode, inode_p, name, data=b''):
-        self.update(inode, inode_p, name, data=b'')
-    def remove(self):
-        self.removed = True
-    def update(self, inode, inode_p, name, data=b''):
+    def __init__(self, inode, stat):
         self.inode = inode
-        self.parent =inode_p
-        self.removed = False
-        self.name = name
-        self.data = data
+        self.stat = stat
+        self.children = {}
+        self.data=b""
     def write(self, offset, buf):
+        assert self.is_reg(), "Called write function on the file which is not regular file."
         d = self.data
         self.data = d[:offset] + buf + d[offset+len(buf):]
-
+    def add_child(self, name, inode):
+        assert self.is_dir(), "Called write function on the file which is not directory"
+        self.children[name] = inode
+    def del_child(self, name):
+        assert self.is_dir(), "Called write function on the file which is not directory"
+        del self.children[name]
+    def is_reg(self):
+        return S_ISREG(self.stat.st_mode) != 0
+    def is_dir(self):
+        return S_ISDIR(self.stat.st_mode) != 0
     
 if __name__ == '__main__':
     if len(sys.argv) != 2:
