@@ -20,29 +20,18 @@ class Operations(llfuse.Operations):
         self.contents = {}
         self.stats = {}
         self.inode_count = defaultdict(int)
-        self.lastino = llfuse.ROOT_INODE
+        self.nextino = llfuse.ROOT_INODE
 
         # make root content
-        self.contents[llfuse.ROOT_INODE] = \
-            Content(llfuse.ROOT_INODE, llfuse.ROOT_INODE, b"..")
-        s = llfuse.EntryAttributes()
-        s.generation = 0
-        s.entry_timeout = 300
-        s.attr_timeout = 300
-        s.st_ino = llfuse.ROOT_INODE
-        s.st_mode = S_IFDIR|S_IRUSR|S_IRGRP|S_IROTH \
-                    |S_IWUSR|S_IXUSR|S_IXGRP|S_IXOTH
-        s.st_nlink = 1
-        s.st_uid = os.getuid()
-        s.st_gid = os.getgid()
-        s.st_rdev = 0
-        s.st_size = 1
-        s.st_blksize = 512
-        s.st_blocks = 1
-        s.st_mtime = time()
-        s.st_atime = time()
-        s.st_ctime = time()
-        self.stats[llfuse.ROOT_INODE] = s
+        mode = S_IFDIR|S_IRUSR|S_IRGRP|S_IROTH \
+               |S_IWUSR|S_IXUSR|S_IXGRP|S_IXOTH
+        ctx = llfuse.RequestContext();
+        ctx.uid = os.getuid()
+        ctx.gid = os.getgid()
+        ctx.pid = os.getpid()
+        inode, s = self._create_entry(mode, ctx)
+        self.stats[inode] = s
+        self.contents[inode] = Content(inode, inode, b"..")
 
     def open(self, inode, flags):
         logging.debug("Called open function")
@@ -55,30 +44,11 @@ class Operations(llfuse.Operations):
         
     def create(self, inode_p, name, mode, flags, ctx):
         logging.debug("Called create function")
-        inode = self.lastino +1
-        self.lastino = inode
-        c = Content(inode, inode_p, name)
-        self.contents[inode] = c
-        s = llfuse.EntryAttributes()
-        s.generation = 0
-        s.entry_timeout = 300
-        s.attr_timeout = 300
-        s.st_ino = inode
-        s.st_mode = mode
-        s.st_nlink = 1
-        s.st_uid = ctx.uid
-        s.st_gid = ctx.gid
-        s.st_rdev = 0
-        s.st_size = 1
-        s.st_blksize = 512
-        s.st_blocks = 1
-        s.st_mtime = time()
-        s.st_atime = time()
-        s.st_ctime = time()
+        inode, s = self._create_entry(mode, ctx)
         self.stats[inode] = s
-        logging.info("Created file %s(%s)"%(name, inode))
-        return (s.st_ino, s)
-
+        self.contents[inode] = Content(inode, inode_p, name)
+        return (inode, s)
+        
     def getattr(self, inode):
         logging.debug("Called getattr function(inode=%s)"%inode)
         return self.stats[inode]
@@ -122,28 +92,9 @@ class Operations(llfuse.Operations):
 
     def mkdir(self, inode_p, name, mode, ctx):
         logging.debug("Called mkdir function")
-        inode = self.lastino + 1
-        self.lastino = inode
-        self.contents[inode] = \
-            Content(inode, inode_p, name)
-        s = llfuse.EntryAttributes()
-        s.generation = 0
-        s.entry_timeout = 300
-        s.attr_timeout = 300
-        s.st_ino = inode
-        s.st_mode = S_IFDIR|S_IRUSR|S_IRGRP|S_IROTH \
-                    |S_IWUSR|S_IXUSR|S_IXGRP|S_IXOTH
-        s.st_nlink = 1
-        s.st_uid = os.getuid()
-        s.st_gid = os.getgid()
-        s.st_rdev = 0
-        s.st_size = 1
-        s.st_blksize = 512
-        s.st_blocks = 1
-        s.st_mtime = time()
-        s.st_atime = time()
-        s.st_ctime = time()
+        inode, s = self._create_entry(mode, ctx)
         self.stats[inode] = s
+        self.contents[inode] = Content(inode, inode_p, name)
         logging.info("Created directory %s(%s)"%(name, inode))
         return s
         
@@ -219,6 +170,28 @@ class Operations(llfuse.Operations):
         logging.debug("Called releasedir function")
 #    def removexattr(self, inode, name):
 #    def setxattr(self, name, value):
+
+    def _create_entry(self, mode, ctx):
+        inode = self.nextino
+        self.nextino = inode + 1
+        s = llfuse.EntryAttributes()
+        s.generation = 0
+        s.entry_timeout = 300
+        s.attr_timeout = 300
+        s.st_ino = inode
+        s.st_mode = mode
+        s.st_nlink = 1
+        s.st_uid = ctx.uid
+        s.st_gid = ctx.gid
+        s.st_rdev = 0
+        s.st_size = 1
+        s.st_blksize = 512
+        s.st_blocks = 1
+        s.st_mtime = time()
+        s.st_atime = time()
+        s.st_ctime = time()
+        logging.info("Created entry %s"%inode)
+        return (s.st_ino, s)
 
 class Content(object):
     def __init__(self, inode, inode_p, name, data=b''):
