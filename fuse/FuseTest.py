@@ -153,29 +153,6 @@ class Operations(llfuse.Operations):
         s.st_nlink -= 1
         self.contents[inode_p].del_child(name)
 
-    @logger
-    def setattr(self, inode, attr):
-        s = self.contents[inode].stat
-        changed = ""
-        for i in attr.__slots__:
-            st = getattr(attr, i)
-            if st is not None:
-                setattr(s, i, st)
-                changed = i
-                break;
-        else:
-            logging.warning("Failed in setattr. Unknown attribute.")
-            raise llfuse.FUSEError(errno.ENOSYS)
-        if changed == 'st_size':
-            d = self.contents[inode].data
-            if attr.st_size < len(d):
-                self.contents[inode].data = d[:attr.st_size]
-            else:
-                self.contents[inode].data = d + b'\0' * (attr.st_size - len(d))
-        
-        logging.info("Changed value of %s"%changed)
-        return s
-
 #    def mknod(self, inode_p, name, mode, rdev, ctx):
 #    def fsync(self, fh, datasync):
 #    def fsyncdir(self, fh, datasync):
