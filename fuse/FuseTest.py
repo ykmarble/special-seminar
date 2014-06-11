@@ -97,7 +97,7 @@ class Operations(llfuse.Operations):
 
     @logger
     def releasedir(self, fh):
-        self.inode_count[inode] -= 1
+        self.inode_count[fh] -= 1
 
     @logger
     def mkdir(self, inode_p, name, mode, ctx):
@@ -114,13 +114,9 @@ class Operations(llfuse.Operations):
     def forget(self, inode_list):
         pass
 
-    @logger
-    def fsync(self, fh, datasync):
-        pass
+#    def fsync(self, fh, datasync):
 
-    @logger
-    def fsyncdir(self, fh, datasync):
-        pass
+#    def fsyncdir(self, fh, datasync):
 
 #    def getxattr(self, inode, name):
 
@@ -156,39 +152,23 @@ class Operations(llfuse.Operations):
     def setattr(self, inode, attr):
         s = self.contents[inode].stat
         changed = ""
-        if attr.st_size is not None:
+        for i in attr.__slots__:
+            st = getattr(attr, i)
+            if st is not None:
+                setattr(s, i, st)
+                changed = i
+                break;
+        else:
+            logging.warning("Failed in setattr. Unknown attribute.")
+            raise llfuse.FUSEError(errno.ENOSYS)
+        if changed == 'st_size':
             d = self.contents[inode].data
             if attr.st_size < len(d):
                 self.contents[inode].data = d[:attr.st_size]
             else:
                 self.contents[inode].data = d + b'\0' * (attr.st_size - len(d))
-            s.st_size = attr.st_size
-            changed = "st_size"
-        elif attr.st_mode is not None:
-            s.st_mode = attr.st_mode
-            changed = "st_mode"
-        elif attr.st_uid is not None:
-            s.st_uid = attr.st_uid
-            changed = "st_uid"
-        elif attr.st_gid is not None:
-            s.st_gid = attr.st_gid
-            changed = "st_gid"
-        elif attr.st_rdev is not None:
-            s.st_rdev = attr.st_rdev
-            changed = "st_rdev"
-        elif attr.st_atime is not None:
-            s.st_atime = attr.st_atime
-            changed = "st_atime"
-        elif attr.st_mtime is not None:
-            s.st_mtime = attr.st_mtime
-            changed = "st_mtime"
-        elif attr.st_ctime is not None:
-            s.st_mtime = attr.st_ctime
-            changed = "st_ctime"
-        else:
-            logging.warning("Failed in setattr. Unknown attribute.")
-            raise llfuse.FUSEError(errno.ENOSYS)
-        logging.info("Set attribute of %s"%changed)
+        
+        logging.info("Changed value of %s"%changed)
         return s
 
 #    def mknod(self, inode_p, name, mode, rdev, ctx):
