@@ -115,8 +115,6 @@ class Operations(llfuse.Operations):
         pass
 
 #    def link(self, inode, new_parent_inode, new_name):
-#    def readlink(self, inode):
-#    def symlink(self, inode_p, name, target, ctx):
 #    def flush(self, fh):
 
     @logger
@@ -124,6 +122,18 @@ class Operations(llfuse.Operations):
         inode = self.lookup(inode_p_old, name_old).st_ino
         self.contents[inode_p_old].del_child(name_old)
         self.contents[inode_p_new].add_child(name_new, inode)
+        
+    @logger
+    def symlink(self, inode_p, name, target, ctx):
+        mode = S_IFLNK|S_IRUSR|S_IRGRP|S_IROTH \
+               |S_IWUSR|S_IWGRP|S_IWOTH|S_IXUSR|S_IXGRP|S_IXOTH
+        inode, s = self.create(inode_p, name, mode, None, ctx)
+        self.contents[inode].link = target
+        return s
+
+    @logger
+    def readlink(self, inode):
+        return self.contents[inode].link
         
     @logger
     def unlink(self, inode_p, name):
@@ -199,6 +209,7 @@ class Content(object):
     def __init__(self, stat):
         self.stat = stat
         self.children = {}
+        self.link = None
         self.data=b""
     def read(self, off, size):
         return self.data[off:off+size]
@@ -216,6 +227,8 @@ class Content(object):
         return S_ISREG(self.stat.st_mode) != 0
     def is_dir(self):
         return S_ISDIR(self.stat.st_mode) != 0
+    def is_link(self):
+        return S_ISLNK(self.stat.st_mode) != 0
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
