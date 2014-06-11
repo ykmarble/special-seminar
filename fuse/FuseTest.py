@@ -112,11 +112,15 @@ class Operations(llfuse.Operations):
 
     @logger
     def forget(self, inode_list):
-        pass
+        for inode, _ in inode_list:
+            del self.contents[inode]
 
-#    def link(self, inode, new_parent_inode, new_name):
-#    def flush(self, fh):
-
+    def link(self, inode, new_parent_inode, new_name):
+        s = self.contents[inode].stat
+        s.st_nlink += 1
+        self.contents[new_parent_inode].add_child(new_name, inode)
+        return s
+        
     @logger
     def rename(self, inode_p_old, name_old, inode_p_new, name_new):
         inode = self.lookup(inode_p_old, name_old).st_ino
@@ -175,6 +179,7 @@ class Operations(llfuse.Operations):
 #    def mknod(self, inode_p, name, mode, rdev, ctx):
 #    def fsync(self, fh, datasync):
 #    def fsyncdir(self, fh, datasync):
+#    def flush(self, fh):
 #    def statfs(self):
 #    def setxattr(self, name, value):
 #    def getxattr(self, inode, name):
