@@ -114,20 +114,17 @@ class Operations(llfuse.Operations):
     def forget(self, inode_list):
         pass
 
-#    def fsync(self, fh, datasync):
-
-#    def fsyncdir(self, fh, datasync):
-
-#    def getxattr(self, inode, name):
-
 #    def link(self, inode, new_parent_inode, new_name):
-
-#    def linkxattr(self, inode):
-
+#    def readlink(self, inode):
+#    def symlink(self, inode_p, name, target, ctx):
 #    def flush(self, fh):
 
-#    def readlink(self, inode):
-
+    @logger
+    def rename(self, inode_p_old, name_old, inode_p_new, name_new):
+        inode = self.lookup(inode_p_old, name_old).st_ino
+        self.contents[inode_p_old].del_child(name_old)
+        self.contents[inode_p_new].add_child(name_new, inode)
+        
     @logger
     def unlink(self, inode_p, name):
         s = self.lookup(inode_p, name)
@@ -141,12 +138,6 @@ class Operations(llfuse.Operations):
             raise llfuse.FUSEError(errno.ENOTEMPTY)
         s.st_nlink -= 1
         self.contents[inode_p].del_child(name)
-
-#    def symlink(self, inode_p, name, target, ctx):
-
-#    def rename(self, inode_p_old, name_old, inode_p_new, name_new):     
-
-#    def link(self, inode, new_inode_p, new_name):
 
     @logger
     def setattr(self, inode, attr):
@@ -172,9 +163,13 @@ class Operations(llfuse.Operations):
         return s
 
 #    def mknod(self, inode_p, name, mode, rdev, ctx):
+#    def fsync(self, fh, datasync):
+#    def fsyncdir(self, fh, datasync):
 #    def statfs(self):
-#    def removexattr(self, inode, name):
 #    def setxattr(self, name, value):
+#    def getxattr(self, inode, name):
+#    def linkxattr(self, inode):
+#    def removexattr(self, inode, name):
 
     @logger
     def _create_entry(self, mode, ctx):
