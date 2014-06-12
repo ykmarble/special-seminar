@@ -115,6 +115,7 @@ class Operations(llfuse.Operations):
         for inode, _ in inode_list:
             del self.contents[inode]
 
+    @logger
     def link(self, inode, new_parent_inode, new_name):
         s = self.contents[inode].stat
         s.st_nlink += 1
