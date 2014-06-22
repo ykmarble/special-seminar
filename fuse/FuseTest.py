@@ -9,6 +9,7 @@ import os
 import sys
 import logging
 from stat import *
+import struct
 
 def logger(func):
     def _logger(*args, **kargs):
@@ -64,14 +65,14 @@ class Operations(llfuse.Operations):
     @logger
     def lookup(self, inode_p, name):
         try:
-            inode = self.contents[inode_p].children[name]
+            inode = self.contents[inode_p].get_children()[name]
             return self.getattr(inode)
         except KeyError:
             raise llfuse.FUSEError(errno.ENOENT)
 
     @logger
     def readdir(self, inode, off):
-        c = self.contents[inode].children
+        c = self.contents[inode].get_children()
         children = ((name, self.getattr(c[name]), len(c)) for name in c)
         for i in xrange(off):
             try:
@@ -133,12 +134,12 @@ class Operations(llfuse.Operations):
         mode = S_IFLNK|S_IRUSR|S_IRGRP|S_IROTH \
                |S_IWUSR|S_IWGRP|S_IWOTH|S_IXUSR|S_IXGRP|S_IXOTH
         inode, s = self.create(inode_p, name, mode, None, ctx)
-        self.contents[inode].link = target
+        self.contents[inode].setlink(target)
         return s
 
     @logger
     def readlink(self, inode):
-        return self.contents[inode].link
+        return self.contents[inode].getlink()
         
     @logger
     def unlink(self, inode_p, name):
@@ -149,7 +150,7 @@ class Operations(llfuse.Operations):
     @logger
     def rmdir(self, inode_p, name):
         s = self.lookup(inode_p, name)
-        if len(self.contents[s.st_ino].children) != 2:
+        if len(self.contents[s.st_ino].get_children()) != 2:
             raise llfuse.FUSEError(errno.ENOTEMPTY)
         s.st_nlink -= 1
         self.contents[inode_p].del_child(name)
@@ -192,8 +193,7 @@ class Content(object):
     def __init__(self, stat):
         self.stat = stat
         self.children = {}
-        self.link = None
-        self.data=b""
+        self.data=""
     def read(self, off, size):
         return self.data[off:off+size]
     def write(self, offset, buf):
@@ -201,11 +201,19 @@ class Content(object):
         d = self.data
         self.data = d[:offset] + buf + d[offset+len(buf):]
     def add_child(self, name, inode):
-        assert self.is_dir(), "Called write function on the file which is not directory"
+        assert self.is_dir(), "Called add_child function on the file which is not directory"
         self.children[name] = inode
     def del_child(self, name):
-        assert self.is_dir(), "Called write function on the file which is not directory"
+        assert self.is_dir(), "Called del_child function on the file which is not directory"
         del self.children[name]
+    def get_children(self):
+        return children
+    def setlink(self, target):
+        assert self.is_link(), "Called setlink function on the file which is not regular file."
+        self.data = target
+    def getlink(self):
+        assert self.is_link(), "Called getlink function on the file which is not regular file."
+        return self.data
     def is_reg(self):
         return S_ISREG(self.stat.st_mode) != 0
     def is_dir(self):
@@ -227,3 +235,4 @@ if __name__ == '__main__':
         llfuse.close(unmount=False)
         raise
     llfuse.close()
+        
