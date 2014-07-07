@@ -207,7 +207,7 @@ class Content(object):
         assert self.is_dir(), "Called del_child function on the file which is not directory"
         del self.children[name]
     def get_children(self):
-        return children
+        return self.children
     def setlink(self, target):
         assert self.is_link(), "Called setlink function on the file which is not regular file."
         self.data = target
