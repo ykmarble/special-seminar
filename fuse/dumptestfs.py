@@ -9,7 +9,7 @@ def count_bits(n):
     while n != 0:
         if (n & 1 == 1):
             s += 1
-        n >> 1
+        n = n >> 1
     return s
 
 def main():
