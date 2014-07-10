@@ -21,7 +21,7 @@ class Operations(llfuse.Operations):
     '''
     fhとinodeは同じ値を使いまわす
     '''
-    
+
     def __init__(self):
         super(Operations, self).__init__()
         self.contents = {}
@@ -59,6 +59,29 @@ class Operations(llfuse.Operations):
         return self.contents[inode].stat
 
     @logger
+    def setattr(self, inode, attr):
+        s = self.contents[inode].stat
+        changed = ""
+        for i in attr.__slots__:
+            st = getattr(attr, i)
+            if st is not None:
+                setattr(s, i, st)
+                changed = i
+                break;
+        else:
+            logging.warning("Failed in setattr. Unknown attribute.")
+            raise llfuse.FUSEError(errno.ENOSYS)
+        if changed == 'st_size':
+            d = self.contents[inode].data
+            if attr.st_size < len(d):
+                self.contents[inode].data = d[:attr.st_size]
+            else:
+                self.contents[inode].data = d + b'\0' * (attr.st_size - len(d))
+
+        logging.info("Changed value of %s"%changed)
+        return s
+
+    @logger
     def read(self, fh, off, size):
         return self.contents[fh].read(off, size)
 
@@ -84,7 +107,7 @@ class Operations(llfuse.Operations):
     @logger
     def access(self, inode, mode, ctx):
         return True
-        
+
     @logger
     def write(self, fh, offset, buf):
         c = self.contents[fh]
@@ -122,13 +145,13 @@ class Operations(llfuse.Operations):
         s.st_nlink += 1
         self.contents[new_parent_inode].add_child(new_name, inode)
         return s
-        
+
     @logger
     def rename(self, inode_p_old, name_old, inode_p_new, name_new):
         inode = self.lookup(inode_p_old, name_old).st_ino
         self.contents[inode_p_old].del_child(name_old)
         self.contents[inode_p_new].add_child(name_new, inode)
-        
+
     @logger
     def symlink(self, inode_p, name, target, ctx):
         mode = S_IFLNK|S_IRUSR|S_IRGRP|S_IROTH \
@@ -140,7 +163,7 @@ class Operations(llfuse.Operations):
     @logger
     def readlink(self, inode):
         return self.contents[inode].getlink()
-        
+
     @logger
     def unlink(self, inode_p, name):
         s = self.lookup(inode_p, name)
@@ -235,4 +258,3 @@ if __name__ == '__main__':
         llfuse.close(unmount=False)
         raise
     llfuse.close()
-        
