@@ -27,9 +27,10 @@ class Operations(llfuse.Operations):
         self.contents = ContentBuffer(path)
         self.inode_count = defaultdict(int)
         self.nextino = self.contents.next_ino()
+        print self.nextino
         try:
             self.contents[llfuse.ROOT_INODE]
-        except:
+        except KeyError:
             # make root content
             mode = S_IFDIR|S_IRUSR|S_IRGRP|S_IROTH \
                    |S_IWUSR|S_IXUSR|S_IXGRP|S_IXOTH
@@ -91,8 +92,6 @@ class Operations(llfuse.Operations):
     def write(self, fh, offset, buf):
         c = self.contents[fh]
         c.write(offset, buf)
-        c.stat.st_size = len(c.data)
-        c.stat.st_blocks = (c.stat.st_size-1)/512 + 1
         self.contents.flush()
         return len(buf)
 
@@ -158,6 +157,10 @@ class Operations(llfuse.Operations):
             raise llfuse.FUSEError(errno.ENOTEMPTY)
         s.st_nlink -= 1
         self.contents[inode_p].del_child(name)
+
+    @logger
+    def destroy(self):
+        self.contents.flush()
 
 #    def mknod(self, inode_p, name, mode, rdev, ctx):
 #    def fsync(self, fh, datasync):
@@ -242,26 +245,31 @@ class ContentBuffer(object):
 
     def next_ino(self):
         for i in xrange(self.max_ino):
-            if self._get_bit(self.ino_stpatus, i) == 0:
+            if self._get_bit(self.ino_status, i) == 0:
                 return i + llfuse.ROOT_INODE
 
     def flush(self):
         update_list = [key for (key, value) in self.dirty.items() if value]
         with open(self.path, 'r+b') as f:
-            f.seek(self.ino_status_head)
-            f.write(struct.pack("{}B".format(self.inode_bytes), *self.ino_status))
-            f.write(struct.pack("{}B".format(self.blk_bytes), *self.blk_status))
             for inode in update_list:
-                self._set_bit(self.ino_status, inode)
+                self._set_bit(self.ino_status, inode - llfuse.ROOT_INODE)
+                if self.buffer[inode].is_dir():
+                    self.buffer[inode].enc_children()
                 s = self.buffer[inode].stat
                 datap = self._get_space(s.st_size)
-                f.seek(self.content_head + self.struct_content.size * inode)
+                f.seek(self.content_head + self.struct_content.size * (inode - llfuse.ROOT_INODE))
                 f.write(self.struct_content.pack(s.st_ino, s.generation, s.st_mode,
                                                  s.st_nlink, s.st_uid, s.st_gid, s.st_size,
                                                  s.st_atime, s.st_mtime, s.st_ctime, datap))
                 f.seek(self.data_head + datap * self.block_size)
                 f.write(self.buffer[inode].data)
-                ### TODO: dataとchildrenを書き出す(統合方法を考える) ###
+                self.dirty[inode] = False
+            f.seek(self.ino_status_head)
+            f.write(struct.pack("{}B".format(self.inode_bytes), *self.ino_status))
+            f.write(struct.pack("{}B".format(self.blk_bytes), *self.blk_status))
+
+    def set_dirty(self, inode):
+        self.dirty[inode] = True
 
     # datap用の連続領域を探してindex+offsetを返す
     def _get_space(self, size):
@@ -301,19 +309,15 @@ class ContentBuffer(object):
 
     def __getitem__(self, inode):
         if not inode in self.buffer:
-            index = inode - llfuse.ROOT_INODE
-            offset = index % self.byte_size
-            index = index / self.byte_size
-            s = self.ino_status[index]
-            if ((s >> offset) & 1) == 0:   # no entry
+            if self._get_bit(self.ino_status, inode - llfuse.ROOT_INODE) == 0:   # no entry
                 raise KeyError(inode)
             with open(self.path, 'r+b') as f:
                 stat = llfuse.EntryAttributes()
-                f.seek(self.content_head + struct_format.size * (inode - llfuse.ROOT_INODE))
+                f.seek(self.content_head + self.struct_content.size * (inode - llfuse.ROOT_INODE))
                 (st_ino, generation, st_mode,
                  st_nlink, st_uid, st_gid, st_size,
                  st_atime, st_mtime, st_ctime, datap) \
-                    = struct_format.unpack(f.read(struct_format.size))
+                    = self.struct_content.unpack(f.read(self.struct_content.size))
                 stat.st_ino = st_ino
                 stat.generation = generation
                 stat.entry_timeout = 300
@@ -331,12 +335,18 @@ class ContentBuffer(object):
                 stat.st_ctime = st_ctime
                 self.buffer[inode] = Content(stat)
                 f.seek(self.data_head + datap * self.block_size)
-                self.buffer[inode].write(0, f.read(stat.st_size))
+                d = f.read(stat.st_size)
+                self.buffer[inode].write(0, d)
+                if self.buffer[inode].is_dir():
+                    self.buffer[inode].dec_children()
+        else:
+            self.set_dirty(inode)
+
         return self.buffer[inode]
 
     def __setitem__(self, inode, content):
         self.buffer[inode] = content
-        self.dirty[inode] = True
+        self.set_dirty(inode)
 
     def __delitem__(self, key):
         pass
@@ -350,9 +360,10 @@ class Content(object):
     def read(self, off, size):
         return self.data[off:off+size]
     def write(self, offset, buf):
-        assert self.is_reg(), "Called write function on the file which is not regular file."
         d = self.data
         self.data = d[:offset] + buf + d[offset+len(buf):]
+        self.stat.st_size = len(self.data)
+        self.stat.st_blocks = (self.stat.st_size-1)/512 + 1
     def add_child(self, name, inode):
         assert self.is_dir(), "Called add_child function on the file which is not directory"
         self.children[name] = inode
@@ -363,16 +374,43 @@ class Content(object):
         return self.children
     def setlink(self, target):
         assert self.is_link(), "Called setlink function on the file which is not regular file."
-        self.data = target
+        self.write(0, target)
+        self.stat.st_size = len(target)
     def getlink(self):
         assert self.is_link(), "Called getlink function on the file which is not regular file."
         return self.data
     def is_reg(self):
-        return S_ISREG(self.stat.st_mode) != 0
+        return S_ISREG(self.stat.st_mode)
     def is_dir(self):
-        return S_ISDIR(self.stat.st_mode) != 0
+        return S_ISDIR(self.stat.st_mode)
     def is_link(self):
-        return S_ISLNK(self.stat.st_mode) != 0
+        return S_ISLNK(self.stat.st_mode)
+    # childrenを実際にファイルに書き出すバイト列に変換して返す
+    def enc_children(self):
+        assert self.is_dir(), "Called enc_children function on the file which is not directry."
+        s = struct.Struct("IB")
+        d = ""
+        for path, inode in self.children.items():
+            d += s.pack(inode, len(path))
+            d += path
+        self.write(0, d)
+        self.stat.st_size = len(d)
+#        import pdb; pdb.set_trace()
+        return d
+    # バイト列を取ってchildrenにセット
+    def dec_children(self):
+        assert self.is_dir(), "Called dec_children function on the file which is not directry."
+        s = struct.Struct('IB')
+#        import pdb; pdb.set_trace()
+        add = 0
+        while 1:
+            inode, strlen = s.unpack(self.read(add, s.size))
+            add += s.size
+            path = self.read(add, strlen)
+            add += strlen
+            self.children[path] = inode
+            if add == self.stat.st_size:
+                break
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
