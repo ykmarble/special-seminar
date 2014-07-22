@@ -26,8 +26,6 @@ class Operations(llfuse.Operations):
         super(Operations, self).__init__()
         self.contents = ContentBuffer(path)
         self.inode_count = defaultdict(int)
-        self.nextino = self.contents.next_ino()
-        print self.nextino
         try:
             self.contents[llfuse.ROOT_INODE]
         except KeyError:
@@ -140,7 +138,8 @@ class Operations(llfuse.Operations):
     @logger
     def forget(self, inode_list):
         for inode, _ in inode_list:
-            del self.contents[inode]
+            if self.contents[inode].get_stat().st_nlink == 0:
+                del self.contents[inode]
 
     @logger
     def link(self, inode, new_parent_inode, new_name):
@@ -175,8 +174,9 @@ class Operations(llfuse.Operations):
     @logger
     def rmdir(self, inode_p, name):
         s = self.lookup(inode_p, name)
-        if len(self.contents[s.st_ino].get_children()) > 2:
+        if len(self.contents[s.st_ino].get_children()) != 2:
             raise llfuse.FUSEError(errno.ENOTEMPTY)
+        self.contents[s.st_ino].dec_ref()
         self.contents[s.st_ino].dec_ref()
         self.contents[inode_p].del_child(name)
 
@@ -196,8 +196,7 @@ class Operations(llfuse.Operations):
 
     @logger
     def _create_entry(self, mode, ctx):
-        inode = self.nextino
-        self.nextino = inode + 1
+        inode = self.contents.next_ino()
         s = llfuse.EntryAttributes()
         s.generation = 0
         s.entry_timeout = 300
@@ -219,31 +218,11 @@ class Operations(llfuse.Operations):
         return inode
 
 class ContentBuffer(object):
-    """
-    unsigned int ino_length  // inodeエントリ数
-    unsigned int block_length  // block数
-    inode_status ino_length bit  // 該当するinode番号が使用中であれば1
-    block_status block_length bit  //該当ブロックが使用中であれば1
-    --------------------------------------
-    content 構造体 64 byte * 1024 entry = 65536 byte
-    unsigned int st_ino
-    unsigned int generation
-    unsigned int st_mode
-    unsigned int st_nlink
-    unsigned int st_uid
-    unsigned int st_gid
-    unsigned int st_size
-    unsigned long st_atime
-    unsigned long st_mtime
-    unsigned long st_ctime
-    unsigned long datap
-    --------------------------------------
-    以降、データ用領域
-    """
     byte_size = 8
     block_size = 512
     format_content = "7I4L"
     struct_content = struct.Struct(format_content)
+
     def __init__(self, path):
         self.buffer = {}  # メモリ上にのってる
         self.path = path
@@ -267,6 +246,7 @@ class ContentBuffer(object):
     def next_ino(self):
         for i in xrange(self.max_ino):
             if self._get_bit(self.ino_status, i) == 0:
+                self._set_bit(self.ino_status, i)
                 return i + llfuse.ROOT_INODE
 
     def flush(self):
@@ -312,17 +292,20 @@ class ContentBuffer(object):
         index = address / self.byte_size
         offset = address % self.byte_size
         offset = self.byte_size - offset -1
-        return bitmap[index]
+        return (bitmap[index] >> offset) & 1 == 1
 
     # bitmapと相対addressを受け取って該当ビットを立てる
-    def _set_bit(self, bitmap, address, value=1):
+    def _set_bit(self, bitmap, address):
         index = address / self.byte_size
         offset = address % self.byte_size
         offset = self.byte_size - offset -1
-        bitmap[index] = bitmap[index] | (value << offset)
+        bitmap[index] = bitmap[index] | (1 << offset)
 
     def _del_bit(self, bitmap, address):
-        self._set_bit(bitmap, address, 0)
+        index = address / self.byte_size
+        offset = address % self.byte_size
+        offset = self.byte_size - offset -1
+        bitmap[index] = bitmap[index] & ((2**self.byte_size -1)^(1 << offset))
 
     def __getitem__(self, inode):
         if not inode in self.buffer:
@@ -345,8 +328,8 @@ class ContentBuffer(object):
                 stat.st_gid = st_gid
                 stat.st_rdev = 0
                 stat.st_size = st_size
-                stat.st_blksize = 512
-                stat.st_blocks = (st_size-1)/512 + 1
+                stat.st_blksize = self.block_size
+                stat.st_blocks = (st_size-1)/self.block_size + 1
                 stat.st_atime = st_atime
                 stat.st_mtime = st_mtime
                 stat.st_ctime = st_ctime
@@ -362,9 +345,12 @@ class ContentBuffer(object):
         self.buffer[inode] = content
         self.buffer[inode].dirty = True
 
-    def __delitem__(self, key):
-        pass
-
+    def __delitem__(self, inode):
+        self._del_bit(self.ino_status, inode - llfuse.ROOT_INODE)
+        s = self.buffer[inode].get_stat()
+        blocks = (s.st_size-1)/self.block_size + 1
+        del self.buffer[inode]
+        self.flush()
 
 class Content(object):
     def __init__(self, stat):
@@ -427,7 +413,6 @@ class Content(object):
             path = self.read(add, strlen)
             add += strlen
             self.children[path] = inode
-            print self._stat.st_size
             if add == self._stat.st_size:
                 break
 
@@ -448,6 +433,16 @@ class Content(object):
 
     def is_link(self):
         return S_ISLNK(self._stat.st_mode)
+
+
+class Blocks(object):
+    pass
+
+
+class DiskHandler(object):
+    def __init__(self, path):
+        self.filepath = path
+
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
