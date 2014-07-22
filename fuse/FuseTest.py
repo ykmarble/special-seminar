@@ -55,15 +55,15 @@ class Operations(llfuse.Operations):
     def create(self, inode_p, name, mode, flags, ctx):
         inode = self._create_entry(mode, ctx)
         self.contents[inode_p].add_child(name, inode)
-        return (inode, self.contents[inode].stat)
+        return (inode, self.contents[inode].get_stat())
 
     @logger
     def getattr(self, inode):
-        return self.contents[inode].stat
+        return self.contents[inode].get_stat()
 
     @logger
     def setattr(self, inode, attr):
-        s = self.contents[inode].stat
+        s = self.contents[inode].get_stat()
         changed = ""
         for i in attr.__slots__:
             st = getattr(attr, i)
@@ -132,10 +132,10 @@ class Operations(llfuse.Operations):
         self.contents[inode_p].add_child(name, inode)
         c = self.contents[inode]
         c.add_child(".", inode)
-        c.stat.st_nlink += 1
+        c.inc_ref()
         c.add_child("..", inode_p)
-        self.contents[inode_p].stat.st_nlink += 1
-        return c.stat
+        self.contents[inode_p].inc_ref()
+        return c.get_stat()
 
     @logger
     def forget(self, inode_list):
@@ -144,10 +144,9 @@ class Operations(llfuse.Operations):
 
     @logger
     def link(self, inode, new_parent_inode, new_name):
-        s = self.contents[inode].stat
-        s.st_nlink += 1
         self.contents[new_parent_inode].add_child(new_name, inode)
-        return s
+        self.contents[inode].inc_ref()
+        return self.contents[inode].get_stat()
 
     @logger
     def rename(self, inode_p_old, name_old, inode_p_new, name_new):
@@ -170,15 +169,15 @@ class Operations(llfuse.Operations):
     @logger
     def unlink(self, inode_p, name):
         s = self.lookup(inode_p, name)
-        s.st_nlink -= 1
+        self.contents[s.st_ino].dec_ref()
         self.contents[inode_p].del_child(name)
 
     @logger
     def rmdir(self, inode_p, name):
         s = self.lookup(inode_p, name)
-        if len(self.contents[s.st_ino].get_children()) != 2:
+        if len(self.contents[s.st_ino].get_children()) > 2:
             raise llfuse.FUSEError(errno.ENOTEMPTY)
-        s.st_nlink -= 1
+        self.contents[s.st_ino].dec_ref()
         self.contents[inode_p].del_child(name)
 
     @logger
@@ -247,7 +246,6 @@ class ContentBuffer(object):
     struct_content = struct.Struct(format_content)
     def __init__(self, path):
         self.buffer = {}  # メモリ上にのってる
-        self.dirty = defaultdict(bool)
         self.path = path
         s = struct.Struct('2I')
         with open(path, 'rb') as f:
@@ -272,27 +270,23 @@ class ContentBuffer(object):
                 return i + llfuse.ROOT_INODE
 
     def flush(self):
-        update_list = [key for (key, value) in self.dirty.items() if value]
+        update_list = [(i, c) for (i, c) in self.buffer.items() if c.dirty]
         with open(self.path, 'r+b') as f:
-            for inode in update_list:
+            for (inode, content) in update_list:
                 self._set_bit(self.ino_status, inode - llfuse.ROOT_INODE)
-                if self.buffer[inode].is_dir():
-                    self.buffer[inode].enc_children()
-                s = self.buffer[inode].stat
+                s = content.get_stat()
                 datap = self._get_space(s.st_size)
                 f.seek(self.content_head + self.struct_content.size * (inode - llfuse.ROOT_INODE))
                 f.write(self.struct_content.pack(s.st_ino, s.generation, s.st_mode,
                                                  s.st_nlink, s.st_uid, s.st_gid, s.st_size,
                                                  s.st_atime, s.st_mtime, s.st_ctime, datap))
                 f.seek(self.data_head + datap * self.block_size)
-                f.write(self.buffer[inode].data)
-                self.dirty[inode] = False
+                f.write(content.data)
+                content.dirty = False
             f.seek(self.ino_status_head)
             f.write(struct.pack("{}B".format(self.inode_bytes), *self.ino_status))
             f.write(struct.pack("{}B".format(self.blk_bytes), *self.blk_status))
 
-    def set_dirty(self, inode):
-        self.dirty[inode] = True
 
     # datap用の連続領域を探してindex+offsetを返す
     def _get_space(self, size):
@@ -362,14 +356,11 @@ class ContentBuffer(object):
                 self.buffer[inode].write(0, d)
                 if self.buffer[inode].is_dir():
                     self.buffer[inode].dec_children()
-        else:
-            self.set_dirty(inode)
-
         return self.buffer[inode]
 
     def __setitem__(self, inode, content):
         self.buffer[inode] = content
-        self.set_dirty(inode)
+        self.buffer[inode].dirty = True
 
     def __delitem__(self, key):
         pass
@@ -377,68 +368,91 @@ class ContentBuffer(object):
 
 class Content(object):
     def __init__(self, stat):
-        self.stat = stat
+        self._stat = stat
+        self.dirty = False
         self.children = {}
         self.data=""
+
     def read(self, off, size):
         return self.data[off:off+size]
+
     def write(self, offset, buf):
         d = self.data
         self.data = d[:offset] + buf + d[offset+len(buf):]
-        self.stat.st_size = len(self.data)
-        self.stat.st_blocks = (self.stat.st_size-1)/512 + 1
+        self._stat.st_size = len(self.data)
+        self._stat.st_blocks = (self._stat.st_size-1)/512 + 1
+        self.dirty = True
+
+    def get_stat(self):
+        return self._stat
+
+    def inc_ref(self):
+        self._stat.st_nlink += 1
+        self.dirty = True
+
+    def dec_ref(self):
+        self._stat.st_nlink -= 1
+        self.dirty = True
+
     def add_child(self, name, inode):
         assert self.is_dir(), "Called add_child function on the file which is not directory"
         self.children[name] = inode
+        s = struct.Struct('IB')
+        d = ""
+        d += s.pack(inode, len(name))
+        d += name
+        self.write(self._stat.st_size, d)
+
     def del_child(self, name):
         assert self.is_dir(), "Called del_child function on the file which is not directory"
         del self.children[name]
-    def get_children(self):
-        return self.children
-    def setlink(self, target):
-        assert self.is_link(), "Called setlink function on the file which is not regular file."
-        self.write(0, target)
-        self.stat.st_size = len(target)
-    def getlink(self):
-        assert self.is_link(), "Called getlink function on the file which is not regular file."
-        return self.data
-    def is_reg(self):
-        return S_ISREG(self.stat.st_mode)
-    def is_dir(self):
-        return S_ISDIR(self.stat.st_mode)
-    def is_link(self):
-        return S_ISLNK(self.stat.st_mode)
-    # childrenを実際にファイルに書き出すバイト列に変換して返す
-    def enc_children(self):
-        assert self.is_dir(), "Called enc_children function on the file which is not directry."
         s = struct.Struct("IB")
         d = ""
         for path, inode in self.children.items():
             d += s.pack(inode, len(path))
             d += path
         self.write(0, d)
-        self.stat.st_size = len(d)
-#        import pdb; pdb.set_trace()
-        return d
+        self._stat.st_size = len(d)
+
+    def get_children(self):
+        return self.children
+
     # バイト列を取ってchildrenにセット
     def dec_children(self):
-        assert self.is_dir(), "Called dec_children function on the file which is not directry."
         s = struct.Struct('IB')
-#        import pdb; pdb.set_trace()
-        add = 0
+        add = 0  # seek位置
         while 1:
             inode, strlen = s.unpack(self.read(add, s.size))
             add += s.size
             path = self.read(add, strlen)
             add += strlen
             self.children[path] = inode
-            if add == self.stat.st_size:
+            print self._stat.st_size
+            if add == self._stat.st_size:
                 break
+
+    def setlink(self, target):
+        assert self.is_link(), "Called setlink function on the file which is not regular file."
+        self.write(0, target)
+        self._stat.st_size = len(target)
+
+    def getlink(self):
+        assert self.is_link(), "Called getlink function on the file which is not regular file."
+        return self.data
+
+    def is_reg(self):
+        return S_ISREG(self._stat.st_mode)
+
+    def is_dir(self):
+        return S_ISDIR(self._stat.st_mode)
+
+    def is_link(self):
+        return S_ISLNK(self._stat.st_mode)
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
         raise SystemExit('Usage: %s <mountpoint>' % sys.argv[0])
-    logging.basicConfig(level=logging.DEBUG, format='[%(asctime)s] %(message)s')
+    logging.basicConfig(format='[%(asctime)s] %(message)s')
     mountpoint = sys.argv[1]
     operations = Operations(mountpoint + ".tfs")
     llfuse.init(operations, mountpoint, ['fsname=testfs', 'nonempty'])
