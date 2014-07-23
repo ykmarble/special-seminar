@@ -218,106 +218,41 @@ class Operations(llfuse.Operations):
         return inode
 
 class ContentBuffer(object):
-    byte_size = 8
-    block_size = 512
-    format_content = "7I4L"
-    struct_content = struct.Struct(format_content)
 
     def __init__(self, path):
         self.buffer = {}  # メモリ上にのってる
         self.path = path
-        s = struct.Struct('2I')
-        with open(path, 'rb') as f:
-            self.max_ino, self.max_blk = s.unpack(f.read(s.size))
-            self.inode_bytes = (self.max_ino-1)/self.byte_size+1
-            self.blk_bytes = (self.max_blk-1)/self.byte_size+1
-            self.ino_status = struct.unpack("{}B".format(self.inode_bytes),
-                                            f.read(self.inode_bytes))
-            self.blk_status = struct.unpack("{}B".format(self.blk_bytes),
-                                            f.read(self.blk_bytes))
-            self.ino_status = list(self.ino_status)
-            self.blk_status = list(self.blk_status)
-        self.ino_status_head = s.size
-        self.blk_status_head = self.ino_status_head + self.inode_bytes
-        self.content_head = self.blk_status_head + self.blk_bytes
-        self.data_head = self.content_head
-        self.data_head += self.struct_content.size * self.max_ino
+        self.header = TestFSHeader(path)
 
     def next_ino(self):
-        for i in xrange(self.max_ino):
-            if self._get_bit(self.ino_status, i) == 0:
-                self._set_bit(self.ino_status, i)
-                return i + llfuse.ROOT_INODE
+        return self.header.next_ino()
 
     def flush(self):
         update_list = [(i, c) for (i, c) in self.buffer.items() if c.dirty]
         with open(self.path, 'r+b') as f:
             for (inode, content) in update_list:
-                self._set_bit(self.ino_status, inode - llfuse.ROOT_INODE)
                 s = content.get_stat()
-                datap = self._get_space(s.st_size)
-                f.seek(self.content_head + self.struct_content.size * (inode - llfuse.ROOT_INODE))
-                f.write(self.struct_content.pack(s.st_ino, s.generation, s.st_mode,
+                datap = self.header.get_space(s.st_size)
+                f.seek(self.header.content_index2address(inode - llfuse.ROOT_INODE))
+                f.write(Content.struct.pack(s.st_ino, s.generation, s.st_mode,
                                                  s.st_nlink, s.st_uid, s.st_gid, s.st_size,
                                                  s.st_atime, s.st_mtime, s.st_ctime, datap))
-                f.seek(self.data_head + datap * self.block_size)
+                f.seek(self.header.block_index2address(datap))
                 f.write(content.data)
                 content.dirty = False
-            f.seek(self.ino_status_head)
-            f.write(struct.pack("{}B".format(self.inode_bytes), *self.ino_status))
-            f.write(struct.pack("{}B".format(self.blk_bytes), *self.blk_status))
-
-
-    # datap用の連続領域を探してindex+offsetを返す
-    def _get_space(self, size):
-        blks = (size - 1)/self.block_size + 1
-        count = 0
-        for i in xrange(len(self.blk_status)):
-            b = self.blk_status[i]
-            for j in xrange(self.byte_size):
-                if (b >> (7-j)) & 1 == 1:
-                    count = 0
-                    continue
-                else:
-                    count += 1
-                if count >= blks:
-                    add = 8*i + j
-                    for k in xrange(blks):
-                        self._set_bit(self.blk_status, add)
-                        add -= 1
-                    return add + 1
-        raise IOError("No space is avilable.")
-
-    def _get_bit(self, bitmap, address):
-        index = address / self.byte_size
-        offset = address % self.byte_size
-        offset = self.byte_size - offset -1
-        return (bitmap[index] >> offset) & 1 == 1
-
-    # bitmapと相対addressを受け取って該当ビットを立てる
-    def _set_bit(self, bitmap, address):
-        index = address / self.byte_size
-        offset = address % self.byte_size
-        offset = self.byte_size - offset -1
-        bitmap[index] = bitmap[index] | (1 << offset)
-
-    def _del_bit(self, bitmap, address):
-        index = address / self.byte_size
-        offset = address % self.byte_size
-        offset = self.byte_size - offset -1
-        bitmap[index] = bitmap[index] & ((2**self.byte_size -1)^(1 << offset))
+        self.header.flush()
 
     def __getitem__(self, inode):
         if not inode in self.buffer:
-            if self._get_bit(self.ino_status, inode - llfuse.ROOT_INODE) == 0:   # no entry
+            if not self.header.is_usedino(inode):   # no entry
                 raise KeyError(inode)
             with open(self.path, 'r+b') as f:
                 stat = llfuse.EntryAttributes()
-                f.seek(self.content_head + self.struct_content.size * (inode - llfuse.ROOT_INODE))
+                f.seek(self.header.content_index2address(inode - llfuse.ROOT_INODE))
                 (st_ino, generation, st_mode,
                  st_nlink, st_uid, st_gid, st_size,
                  st_atime, st_mtime, st_ctime, datap) \
-                    = self.struct_content.unpack(f.read(self.struct_content.size))
+                    = Content.struct.unpack(f.read(Content.size))
                 stat.st_ino = st_ino
                 stat.generation = generation
                 stat.entry_timeout = 300
@@ -328,13 +263,13 @@ class ContentBuffer(object):
                 stat.st_gid = st_gid
                 stat.st_rdev = 0
                 stat.st_size = st_size
-                stat.st_blksize = self.block_size
-                stat.st_blocks = (st_size-1)/self.block_size + 1
+                stat.st_blksize = self.header.block_size
+                stat.st_blocks = (st_size-1)/self.header.block_size + 1
                 stat.st_atime = st_atime
                 stat.st_mtime = st_mtime
                 stat.st_ctime = st_ctime
                 self.buffer[inode] = Content(stat)
-                f.seek(self.data_head + datap * self.block_size)
+                f.seek(self.header.block_index2address(datap))
                 d = f.read(stat.st_size)
                 self.buffer[inode].write(0, d)
                 if self.buffer[inode].is_dir():
@@ -346,13 +281,15 @@ class ContentBuffer(object):
         self.buffer[inode].dirty = True
 
     def __delitem__(self, inode):
-        self._del_bit(self.ino_status, inode - llfuse.ROOT_INODE)
+        self.header.release_ino(inode)
         s = self.buffer[inode].get_stat()
-        blocks = (s.st_size-1)/self.block_size + 1
+        blocks = (s.st_size-1)/self.header.block_size + 1
         del self.buffer[inode]
-        self.flush()
 
 class Content(object):
+    struct = struct.Struct("7I4L")
+    size = struct.size
+
     def __init__(self, stat):
         self._stat = stat
         self.dirty = False
@@ -436,13 +373,99 @@ class Content(object):
 
 
 class Blocks(object):
-    pass
+    def __init__(self, size):
+        self._blklength = (size-1)/self.block_size +1  # 保有しているブロック数
+        self.max_size = self._blklength * block_size  # 保有している最大サイズ
+#        self.head
 
 
-class DiskHandler(object):
+class TestFSHeader(object):
+    byte_size = 8
+    block_size = 512
     def __init__(self, path):
-        self.filepath = path
+        self.path = path
+        s = struct.Struct('2I')
+        with open(path, 'rb') as f:
+            self.max_ino, self.max_blk = s.unpack(f.read(s.size))
+            self.inode_bytes = (self.max_ino-1)/self.byte_size+1
+            self.blk_bytes = (self.max_blk-1)/self.byte_size+1
+            self.ino_status = struct.unpack("{}B".format(self.inode_bytes),
+                                            f.read(self.inode_bytes))
+            self.blk_status = struct.unpack("{}B".format(self.blk_bytes),
+                                            f.read(self.blk_bytes))
+            self.ino_status = list(self.ino_status)
+            self.blk_status = list(self.blk_status)
+        # 各データの先頭アドレス
+        self.ino_status_head = s.size
+        self.blk_status_head = self.ino_status_head + self.inode_bytes
+        self.content_head = self.blk_status_head + self.blk_bytes
+        self.data_head = self.content_head
+        self.data_head += Content.size * self.max_ino
 
+    def flush(self):
+        with open(self.path, 'r+b') as f:
+            f.seek(self.ino_status_head)
+            f.write(struct.pack("{}B".format(self.inode_bytes), *self.ino_status))
+            f.write(struct.pack("{}B".format(self.blk_bytes), *self.blk_status))
+
+    # 空いているinode番号を得る
+    def next_ino(self):
+        for i in xrange(self.max_ino):
+            if self._get_bit(self.ino_status, i) == 0:
+                self._set_bit(self.ino_status, i)
+                return i + llfuse.ROOT_INODE
+
+    def release_ino(self, inode):
+        self._del_bit(self.ino_status, inode - llfuse.ROOT_INODE)
+
+    def is_usedino(self, inode):
+        return self._get_bit(self.ino_status, inode - llfuse.ROOT_INODE) == 1
+
+    # indexから実際にディスク上のアドレスを返す
+    def content_index2address(self, index):
+        return self.content_head + Content.size * index
+
+    def block_index2address(self, index):
+        return self.data_head + index * self.block_size
+
+    # 連続領域を探してindexを返す
+    def get_space(self, size):
+        blks = (size - 1)/self.block_size + 1
+        count = 0
+        for i in xrange(len(self.blk_status)):
+            b = self.blk_status[i]
+            for j in xrange(self.byte_size):
+                if (b >> (7-j)) & 1 == 1:
+                    count = 0
+                    continue
+                else:
+                    count += 1
+                if count >= blks:
+                    add = 8*i + j
+                    for k in xrange(blks):
+                        self._set_bit(self.blk_status, add)
+                        add -= 1
+                    return add + 1
+        raise IOError("No space is avilable.")
+
+    def _get_bit(self, bitmap, address):
+        index = address / self.byte_size
+        offset = address % self.byte_size
+        offset = self.byte_size - offset -1
+        return (bitmap[index] >> offset) & 1 == 1
+
+    # bitmapと相対addressを受け取って該当ビットを立てる
+    def _set_bit(self, bitmap, address):
+        index = address / self.byte_size
+        offset = address % self.byte_size
+        offset = self.byte_size - offset -1
+        bitmap[index] = bitmap[index] | (1 << offset)
+
+    def _del_bit(self, bitmap, address):
+        index = address / self.byte_size
+        offset = address % self.byte_size
+        offset = self.byte_size - offset -1
+        bitmap[index] = bitmap[index] & ((2**self.byte_size -1)^(1 << offset))
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
