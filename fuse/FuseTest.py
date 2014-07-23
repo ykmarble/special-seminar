@@ -73,12 +73,7 @@ class Operations(llfuse.Operations):
             logging.warning("Failed in setattr. Unknown attribute.")
             raise llfuse.FUSEError(errno.ENOSYS)
         if changed == 'st_size':
-            d = self.contents[inode].data
-            if attr.st_size < len(d):
-                self.contents[inode].data = d[:attr.st_size]
-            else:
-                self.contents[inode].data = d + b'\0' * (attr.st_size - len(d))
-
+            self.contents[inode].data.set_size(attr.st_size)
         logging.info("Changed value of %s"%changed)
         return s
 
@@ -213,9 +208,10 @@ class Operations(llfuse.Operations):
         s.st_mtime = int(time())
         s.st_atime = int(time())
         s.st_ctime = int(time())
-        self.contents[inode] = Content(s)
+        self.contents[inode] = Content(s, Blocks(self.contents.header))
         logging.info("Created entry %s"%inode)
         return inode
+
 
 class ContentBuffer(object):
 
@@ -232,13 +228,12 @@ class ContentBuffer(object):
         with open(self.path, 'r+b') as f:
             for (inode, content) in update_list:
                 s = content.get_stat()
-                datap = self.header.get_space(s.st_size)
                 f.seek(self.header.content_index2address(inode - llfuse.ROOT_INODE))
                 f.write(Content.struct.pack(s.st_ino, s.generation, s.st_mode,
-                                                 s.st_nlink, s.st_uid, s.st_gid, s.st_size,
-                                                 s.st_atime, s.st_mtime, s.st_ctime, datap))
-                f.seek(self.header.block_index2address(datap))
-                f.write(content.data)
+                                            s.st_nlink, s.st_uid, s.st_gid, s.st_size,
+                                            s.st_atime, s.st_mtime, s.st_ctime,
+                                            content.data.head))
+                content.data.flush(f)
                 content.dirty = False
         self.header.flush()
 
@@ -268,7 +263,7 @@ class ContentBuffer(object):
                 stat.st_atime = st_atime
                 stat.st_mtime = st_mtime
                 stat.st_ctime = st_ctime
-                self.buffer[inode] = Content(stat)
+                self.buffer[inode] = Content(stat, Blocks(self.header))
                 f.seek(self.header.block_index2address(datap))
                 d = f.read(stat.st_size)
                 self.buffer[inode].write(0, d)
@@ -282,27 +277,25 @@ class ContentBuffer(object):
 
     def __delitem__(self, inode):
         self.header.release_ino(inode)
-        s = self.buffer[inode].get_stat()
-        blocks = (s.st_size-1)/self.header.block_size + 1
         del self.buffer[inode]
+
 
 class Content(object):
     struct = struct.Struct("7I4L")
     size = struct.size
 
-    def __init__(self, stat):
+    def __init__(self, stat, blocks):
         self._stat = stat
         self.dirty = False
         self.children = {}
-        self.data=""
+        self.data = blocks
 
     def read(self, off, size):
-        return self.data[off:off+size]
+        return self.data.read(off, size)
 
     def write(self, offset, buf):
-        d = self.data
-        self.data = d[:offset] + buf + d[offset+len(buf):]
-        self._stat.st_size = len(self.data)
+        self.data.write(offset, buf)
+        self._stat.st_size = self.data.size
         self._stat.st_blocks = (self._stat.st_size-1)/512 + 1
         self.dirty = True
 
@@ -360,7 +353,7 @@ class Content(object):
 
     def getlink(self):
         assert self.is_link(), "Called getlink function on the file which is not regular file."
-        return self.data
+        return self.data.read()
 
     def is_reg(self):
         return S_ISREG(self._stat.st_mode)
@@ -373,11 +366,38 @@ class Content(object):
 
 
 class Blocks(object):
-    def __init__(self, size):
-        self._blklength = (size-1)/self.block_size +1  # 保有しているブロック数
-        self.max_size = self._blklength * block_size  # 保有している最大サイズ
-#        self.head
+    def __init__(self, header):
+        self._blk_length = 0  # 保有しているブロック数
+        self.max_size = 0  # 保有している最大サイズ
+        self.size = 0
+        self.head = 0  # 保有しているブロックの先頭index
+        self.header = header  # TestFSHeaderのインスタンス
+        self.block_size = self.header.block_size
+        self.data = ""
 
+    def set_size(self, size):
+        if size < self.size:
+            self.data = self.data[size]
+        self.size = size
+        if self.size > self.max_size:
+            self._blk_length = (size - 1) / self.header.block_size + 1
+            self.max_size = self._blk_length * self.block_size
+            self.head = self.header.get_space(size)
+
+    def read(self, offset=0, size=0):
+        if size == 0:
+            return self.data[offset:]
+        return self.data[offset:offset+size]
+
+    def write(self, offset, buf):
+        d = self.data
+        d = d[:offset] + buf + d[offset+len(buf):]
+        self.set_size(len(d))
+        self.data = d
+
+    def flush(self, handler):
+        handler.seek(self.header.block_index2address(self.head))
+        handler.write(self.data)
 
 class TestFSHeader(object):
     byte_size = 8
@@ -414,6 +434,7 @@ class TestFSHeader(object):
             if self._get_bit(self.ino_status, i) == 0:
                 self._set_bit(self.ino_status, i)
                 return i + llfuse.ROOT_INODE
+            raise IOError("All inode entries are used.")
 
     def release_ino(self, inode):
         self._del_bit(self.ino_status, inode - llfuse.ROOT_INODE)
