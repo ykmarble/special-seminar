@@ -263,7 +263,7 @@ class ContentBuffer(object):
                 stat.st_atime = st_atime
                 stat.st_mtime = st_mtime
                 stat.st_ctime = st_ctime
-                self.buffer[inode] = Content(stat, Blocks(self.header))
+                self.buffer[inode] = Content(stat, Blocks(self.header, head=datap, size=st_size))
                 f.seek(self.header.block_index2address(datap))
                 d = f.read(stat.st_size)
                 self.buffer[inode].write(0, d)
@@ -277,6 +277,7 @@ class ContentBuffer(object):
 
     def __delitem__(self, inode):
         self.header.release_ino(inode)
+        self.buffer[inode].data.release()
         del self.buffer[inode]
 
 
@@ -337,14 +338,18 @@ class Content(object):
     def dec_children(self):
         s = struct.Struct('IB')
         add = 0  # seek位置
-        while 1:
-            inode, strlen = s.unpack(self.read(add, s.size))
-            add += s.size
-            path = self.read(add, strlen)
-            add += strlen
-            self.children[path] = inode
-            if add == self._stat.st_size:
-                break
+        try :
+            while 1:
+                inode, strlen = s.unpack(self.read(add, s.size))
+                add += s.size
+                path = self.read(add, strlen)
+                add += strlen
+                self.children[path] = inode
+                if add == self._stat.st_size:
+                    break
+        except :
+            print self.children
+            raise
 
     def setlink(self, target):
         assert self.is_link(), "Called setlink function on the file which is not regular file."
@@ -366,21 +371,22 @@ class Content(object):
 
 
 class Blocks(object):
-    def __init__(self, header):
-        self._blk_length = 0  # 保有しているブロック数
-        self.max_size = 0  # 保有している最大サイズ
-        self.size = 0
-        self.head = 0  # 保有しているブロックの先頭index
+    def __init__(self, header, head=0, size=0):
         self.header = header  # TestFSHeaderのインスタンス
+        self.head = head  # 保有しているブロックの先頭index
+        self.size = size
         self.block_size = self.header.block_size
+        self._blk_length = (self.size -1) / self.block_size + 1  # 保有しているブロック数
+        self.max_size = self._blk_length * self.block_size   # 保有している最大サイズ
         self.data = ""
 
     def set_size(self, size):
         if size < self.size:
-            self.data = self.data[size]
+            self.data = self.data[:size]
         self.size = size
         if self.size > self.max_size:
-            self._blk_length = (size - 1) / self.header.block_size + 1
+            self.release()
+            self._blk_length = (self.size - 1) / self.block_size + 1
             self.max_size = self._blk_length * self.block_size
             self.head = self.header.get_space(size)
 
@@ -398,6 +404,10 @@ class Blocks(object):
     def flush(self, handler):
         handler.seek(self.header.block_index2address(self.head))
         handler.write(self.data)
+
+    def release(self):
+        for i in xrange(self.head, self.head + self._blk_length):
+            self.header.release_block(i)
 
 class TestFSHeader(object):
     byte_size = 8
@@ -434,10 +444,13 @@ class TestFSHeader(object):
             if self._get_bit(self.ino_status, i) == 0:
                 self._set_bit(self.ino_status, i)
                 return i + llfuse.ROOT_INODE
-            raise IOError("All inode entries are used.")
+        raise IOError("All inode entries are used.")
 
     def release_ino(self, inode):
         self._del_bit(self.ino_status, inode - llfuse.ROOT_INODE)
+
+    def release_block(self, block):
+        self._del_bit(self.blk_status, block)
 
     def is_usedino(self, inode):
         return self._get_bit(self.ino_status, inode - llfuse.ROOT_INODE) == 1
