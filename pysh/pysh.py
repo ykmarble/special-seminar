@@ -7,6 +7,13 @@ import subprocess
 import shlex
 import cStringIO
 
+def system(args, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stdout):
+    pid = os.fork()
+    if pid == 0:
+        os.execvp(args[0], args)
+    else:
+        return pid
+
 class Parser(object):
     st_normal = 0
     st_squote = 1
@@ -138,8 +145,9 @@ def eval_tokens(tokens, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
             p = subprocess.Popen(cmdline, stdin=stdin, stdout=subprocess.PIPE, stderr=stderr)
             exit_status = eval_tokens(list(token_iter), stdin=p.stdout, stdout=stdout, stderr=stderr)
         elif t == ";":
-            p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
-            p.wait()
+            #p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
+            #p.wait()
+            system(cmdline)
             exit_status = eval_tokens(list(token_iter))
             break
         elif t == ">":
