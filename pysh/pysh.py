@@ -6,6 +6,7 @@ import sys
 import subprocess
 import shlex
 import cStringIO
+from itertools import tee
 
 def system(args, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stdout):
     pid = os.fork()
@@ -128,7 +129,22 @@ def eval_tokens(tokens, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
     token_iter = tokens.__iter__()
     for t in token_iter:
         if t == "(":
-            pass
+            in_paren = []
+            c = 1
+            while c > 0:
+                try:
+                    l = token_iter.next()
+                except StopIteration:
+                    print "Unbalanced parenthesis"
+                    return 1
+                in_paren.append(l)
+                if l == "(":
+                    c += 1
+                elif l == ")":
+                    c -= 1
+            eval_tokens(in_paren[:-1], stdin, stdout, stderr)
+
+
         elif t == "&&":
             p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
             exit_status = p.wait()
@@ -145,9 +161,10 @@ def eval_tokens(tokens, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
             p = subprocess.Popen(cmdline, stdin=stdin, stdout=subprocess.PIPE, stderr=stderr)
             exit_status = eval_tokens(list(token_iter), stdin=p.stdout, stdout=stdout, stderr=stderr)
         elif t == ";":
-            #p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
-            #p.wait()
-            system(cmdline)
+            p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
+            p.wait()
+            #pid = system(cmdline)
+            print os.waitpid(pid, 0)
             exit_status = eval_tokens(list(token_iter))
             break
         elif t == ">":
@@ -164,7 +181,7 @@ def eval_tokens(tokens, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
             pass
         elif t == "&":
             p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
-            exit_status = 0
+            exit_status = eval_tokens(list(token_iter))
             break
         elif t == "!":
             pass
@@ -181,7 +198,7 @@ def main():
             parser.feed("\n")
             parser.feed(raw_input("> "))
         tokens = parser.pop_tokens()
-        print tokens
+        #print tokens
         eval_tokens(tokens)
 
 
