@@ -4,10 +4,12 @@
 import os
 import sys
 import subprocess
-import shlex
+import argparse
+import readline
 import cStringIO
 from itertools import tee
 
+ENV = {}
 def system(args, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stdout):
     pid = os.fork()
     if pid == 0:
@@ -180,28 +182,66 @@ def eval_tokens(tokens, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
             # TODO: raw input
             pass
         elif t == "&":
-            p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
+            pid = system(cmdline, stdin, stdout, stderr)
             exit_status = eval_tokens(list(token_iter))
+            cmdline = []
             break
+        elif t[0] == "$" and len(t) != 1:  # variable
+            name = t[1:]
+            cmdline.append(ENV[name])
         elif t == "!":
             pass
         else:
             cmdline.append(t)
+    if cmdline:
+        pid = system(cmdline, stdin, stdout, stderr)
+        exit_status = os.waitpid(pid, 0)[1] >> 8
     return exit_status
 
 
-def main():
+def repl():
+    import readline
+    import atexit
     parser = Parser()
+    hist = os.path.join("~", ".pysh_history")
+    try:
+        readline.read_history_file(hist)
+    except IOError:
+        pass
+    atexit.register(readline.write_history_file, hist)
     while True:
         parser.feed(raw_input("$ "))
         while not parser.parse():
             parser.feed("\n")
             parser.feed(raw_input("> "))
         tokens = parser.pop_tokens()
-        #print tokens
         eval_tokens(tokens)
 
-
+def eval_string(s):
+    parser = Parser()
+    parser.feed(s)
+    parser.parse()
+    tokens = parser.pop_tokens()
+    return eval_tokens(tokens)
 
 if __name__ == '__main__':
-    main()
+    print "This is pysh"
+    p = argparse.ArgumentParser(description="excute command in pure Python")
+    p.add_argument("-c", metavar="string", help="excute command from string")
+    p.add_argument("-i", action="store_true", help="be interactive")
+    p.add_argument("file", nargs="?")
+    p.add_argument("arg", nargs="*")
+    args = p.parse_args(sys.argv[1:])
+    if (args.c is not None):
+        eval_string(args.c)
+    elif (args.file is not None):
+        with open(args.file) as h:
+            s = h.read()
+        ENV["0"] = args.file
+        for i, a in enumerate(args.arg):
+            ENV[str(i+1)] = a
+        eval_string(s)
+    else:
+        repl()
+    if (args.i):
+        repl()
