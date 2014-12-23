@@ -80,7 +80,8 @@ class Parser(object):
                         self.buffer = ''
                     else:
                         self.tokens.append(self.buffer)
-                        self.stream.seek(-1, os.SEEK_CUR)
+                        if n != '':
+                            self.stream.seek(-1, os.SEEK_CUR)
                         self.buffer = ''
                 else:
                     self.buffer += n
@@ -108,12 +109,14 @@ class Parser(object):
                     self.tokens.append(self.buffer)
                     self.buffer = ''
                     self.state = self.st_normal
-                    self.stream.seek(-1, os.SEEK_CUR)
+                    if n != '':
+                        self.stream.seek(-1, os.SEEK_CUR)
+        if self.state == self.st_variable:
+            self.state = self.st_normal
         if self.state == self.st_normal:
             self.tokens.append(self.buffer)
             self.buffer = ''
             self.tokens = [t for t in self.tokens if bool(t)]
-            self.tokens.append(";")
             return True
         else:
             print "Encountered EOF during parsing.[state={}]".format(self.state)
