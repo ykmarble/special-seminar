@@ -10,9 +10,13 @@ import cStringIO
 from itertools import tee
 
 ENV = {}
+
 def system(args, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stdout):
     pid = os.fork()
     if pid == 0:
+        os.dup2(stdin.fileno(), sys.stdin.fileno())
+        os.dup2(stdout.fileno(), sys.stdout.fileno())
+        os.dup2(stderr.fileno(), sys.stderr.fileno())
         os.execvp(args[0], args)
     else:
         return pid
@@ -151,26 +155,34 @@ def eval_tokens(tokens, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
 
 
         elif t == "&&":
-            p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
-            exit_status = p.wait()
+            pid = system(cmdline, stdin, stdout, stderr)
+            exit_status = os.waitpid(pid, 0)[1] >> 8
+            cmdline = []
             if exit_status == 0:
                 exit_status = eval_tokens(list(token_iter))
             break
         elif t == "||":
-            p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
-            exit_status = p.wait()
+            pid = system(cmdline, stdin, stdout, stderr)
+            exit_status = os.waitpid(pid, 0)[1] >> 8
+            cmdline = []
             if exit_status != 0:
                 exit_status = eval_tokens(list(token_iter))
             break
         elif t == "|":
-            p = subprocess.Popen(cmdline, stdin=stdin, stdout=subprocess.PIPE, stderr=stderr)
-            exit_status = eval_tokens(list(token_iter), stdin=p.stdout, stdout=stdout, stderr=stderr)
+            #p = subprocess.Popen(cmdline, stdin=stdin, stdout=subprocess.PIPE, stderr=stderr)
+            #exit_status = eval_tokens(list(token_iter), stdin=p.stdout, stdout=stdout, stderr=stderr)
+            r, w = os.pipe()
+            p1 = system(cmdline, stdin, w, stderr)
+            eval_tokens(list(token_iter), stdin=r)
+            os.waitpid(p1, 0)
+            os.close(w)
+            cmdline = []
+            break
         elif t == ";":
-            p = subprocess.Popen(cmdline, stdin=stdin, stdout=stdout, stderr=stderr)
-            p.wait()
-            #pid = system(cmdline)
-            print os.waitpid(pid, 0)
+            pid = system(cmdline, stdin, stdout, stderr)
+            os.waitpid(pid, 0)
             exit_status = eval_tokens(list(token_iter))
+            cmdline = []
             break
         elif t == ">":
             path = token_iter.next()
