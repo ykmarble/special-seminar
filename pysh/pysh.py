@@ -131,6 +131,49 @@ class Parser(object):
         self.tokens = []
         return t
 
+def build_exp(tokens):
+    sep = [";", "&", "|", "&&", "||"]
+    redirect = ["<", ">", "<<", ">>", "&>"]
+    exp = {}
+    exp["type"] = "exp"
+    exp["neg"] = False
+    exp["arg"] = []
+    exp["extention"] = []
+    token_iter = tokens.__iter__()
+
+    # contains line-separater
+    for i, t in enumerate(tokens):
+        if t in sep:
+            exp["sep"] = t
+            exp["left"] = build_exp(tokens[:i])
+            if tokens[i+1:] != []:
+                exp["right"] = build_exp(tokens[i+1:])
+            else:
+                exp["right"] = None
+            return exp
+
+    # one line
+    for t in token_iter:
+        if t == "!":
+            exp["neg"] = True
+        elif t in redirect:
+            red = {}
+            red["type"] = "redirect"
+            red["op"] = t
+            red["arg"] = token_iter.next()
+            exp["extention"].append(red)
+        elif t[0] == "$" and len(t) != 1:  # variable
+            v = {}
+            v["type"] = "variable"
+            v["name"] = t[1:]
+            exp["arg"].append(v)
+        else:
+            s = {}
+            s["type"] = "string"
+            s["value"] = t
+            exp["arg"].append(s)
+    return exp
+
 # eval order: () -> && -> || -> | -> ;
 def eval_tokens(tokens, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
     cmdline = []
