@@ -212,13 +212,13 @@ def eval_tokens(tokens, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
                 exit_status = eval_tokens(list(token_iter))
             break
         elif t == "|":
-            #p = subprocess.Popen(cmdline, stdin=stdin, stdout=subprocess.PIPE, stderr=stderr)
-            #exit_status = eval_tokens(list(token_iter), stdin=p.stdout, stdout=stdout, stderr=stderr)
             r, w = os.pipe()
+            r = os.fdopen(r, 'r')
+            w = os.fdopen(w, 'w')
             p1 = system(cmdline, stdin, w, stderr)
-            eval_tokens(list(token_iter), stdin=r)
             os.waitpid(p1, 0)
-            os.close(w)
+            w.close()
+            eval_tokens(list(token_iter), stdin=r)
             cmdline = []
             break
         elif t == ";":
