@@ -2,7 +2,6 @@ class: center, middle
 
 # Pythonによるファイルシステムとシェルの作成実験
 
-201311357 黒川佑郁
 
 ---
 ## 目次
@@ -49,6 +48,10 @@ class: center, middle
 ---
 ## イメージ
 
+![FUSE](./ext4.png)
+---
+## イメージ
+
 ![FUSE](./fuse.png)
 
 ---
@@ -70,16 +73,6 @@ class: center, middle
 * ファイルの作成や削除、読み書き
 * ディレクトリも作れる
 * シンボリックリンクも作れる
-
----
-## ファイル構造
-
-* inodeエントリ数
-* block数
-* inode番号の使用状況のbitmap
-* blockの使用状況のbitmap
-* inode
-* block
 
 ---
 ## ファイルシステムのデモ
@@ -104,7 +97,7 @@ class: center, middle
 
 --
 
-* 気づいたらシェルになってた
+* もしかして: シェル
 
 ---
 ## 製作物その2 シェル
@@ -129,6 +122,7 @@ class: center, middle
 
 ---
 ## シェルのデモ
+
 
 ---
 ## 1年を通じての成果
